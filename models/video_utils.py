@@ -48,7 +48,8 @@ def render_images(
     dataset: SplitWrapper,
     compute_metrics: bool = False,
     compute_error_map: bool = False,
-    vis_indices: Optional[List[int]] = None
+    vis_indices: Optional[List[int]] = None,
+    save_video_kwargs: Optional[Dict] = None,
 ):
     """
     Render pixel-related outputs from a model.
@@ -64,7 +65,8 @@ def render_images(
         trainer=trainer,
         compute_metrics=compute_metrics,
         compute_error_map=compute_error_map,
-        vis_indices=vis_indices
+        vis_indices=vis_indices,
+        save_video_kwargs=save_video_kwargs,
     )
     if compute_metrics:
         num_samples = len(dataset) if vis_indices is None else len(vis_indices)
@@ -90,6 +92,7 @@ def render(
     compute_metrics: bool = False,
     compute_error_map: bool = False,
     vis_indices: Optional[List[int]] = None,
+    save_video_kwargs: Optional[Dict] = None,
 ):
     """
     Renders a dataset utilizing a specified render function.
@@ -116,6 +119,35 @@ def render(
     
     # misc
     cam_names, cam_ids = [], []
+    render_buffers = {
+        "rgbs": rgbs,
+        "gt_rgbs": gt_rgbs,
+        "rgb_sky_blend": rgb_sky_blend,
+        "rgb_sky": rgb_sky,
+        "Background_rgbs": Background_rgbs,
+        "RigidNodes_rgbs": RigidNodes_rgbs,
+        "DeformableNodes_rgbs": DeformableNodes_rgbs,
+        "SMPLNodes_rgbs": SMPLNodes_rgbs,
+        "Dynamic_rgbs": Dynamic_rgbs,
+        "rgb_error_maps": error_maps,
+        "depths": depths,
+        "lidar_on_images": lidar_on_images,
+        "opacities": opacities,
+        "gt_sky_masks": sky_masks,
+        "Background_depths": Background_depths,
+        "RigidNodes_depths": RigidNodes_depths,
+        "DeformableNodes_depths": DeformableNodes_depths,
+        "SMPLNodes_depths": SMPLNodes_depths,
+        "Dynamic_depths": Dynamic_depths,
+        "Background_opacities": Background_opacities,
+        "RigidNodes_opacities": RigidNodes_opacities,
+        "DeformableNodes_opacities": DeformableNodes_opacities,
+        "SMPLNodes_opacities": SMPLNodes_opacities,
+        "Dynamic_opacities": Dynamic_opacities,
+        "cam_names": cam_names,
+        "cam_ids": cam_ids,
+    }
+    stream_writers, vis_frame_dict = {}, {}
 
     if compute_metrics:
         psnrs, ssim_scores, lpipss = [], [], []
@@ -127,7 +159,7 @@ def render(
     with torch.no_grad():
         indices = vis_indices if vis_indices is not None else range(len(dataset))
         camera_downscale = trainer._get_downscale_factor()
-        for i in tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True):
+        for frame_idx, i in enumerate(tqdm(indices, desc=f"rendering {dataset.split}", dynamic_ncols=True)):
             # get image and camera infos
             image_infos, cam_infos = dataset.get_image(i, camera_downscale)
             for k, v in image_infos.items():
@@ -317,6 +349,24 @@ def render(
                             )[1][vehicle_mask].mean()
                         )
 
+            if save_video_kwargs is not None and (
+                (frame_idx + 1) % save_video_kwargs["num_cams"] == 0
+            ):
+                vis_frame_dict.update(stream_video_frame(
+                    render_buffers,
+                    stream_writers,
+                    frame_idx=frame_idx // save_video_kwargs["num_cams"],
+                    **save_video_kwargs,
+                ))
+                for buffer in render_buffers.values():
+                    buffer.clear()
+
+    if save_video_kwargs is not None:
+        for writer in stream_writers.values():
+            writer.close()
+        if save_video_kwargs.get("verbose", True):
+            logger.info(f"saved video to {save_video_kwargs['save_pth']}")
+
     # messy aggregation...
     results_dict = {}
     results_dict["psnr"] = non_zero_mean(psnrs) if compute_metrics else -1
@@ -378,7 +428,66 @@ def render(
         results_dict["SMPLNodes_opacities"] = SMPLNodes_opacities
     if len(Dynamic_opacities) > 0:
         results_dict["Dynamic_opacities"] = Dynamic_opacities
+    if save_video_kwargs is not None:
+        results_dict["vis_frame_dict"] = vis_frame_dict
     return results_dict
+
+
+def stream_video_frame(
+    render_results: Dict[str, List[Tensor]],
+    writers: Dict,
+    save_pth: str,
+    layout: Callable,
+    num_timestamps: int,
+    keys: List[str] = ["gt_rgbs", "rgbs", "depths"],
+    save_seperate_video: bool = False,
+    fps: int = 10,
+    frame_idx: int = 0,
+    **_,
+):
+    return_frame_dict, merged_list = {}, []
+    for key in keys:
+        result_key = key.replace("mask", "opacities") if "mask" in key else key
+        if result_key not in render_results or len(render_results[result_key]) == 0:
+            continue
+
+        frames = render_results[result_key]
+        if key == "gt_sky_masks" or "mask" in key:
+            frames = [np.stack([frame, frame, frame], axis=-1) for frame in frames]
+        elif "depth" in key:
+            opacity_key = key.replace("depths", "opacities")
+            if opacity_key not in render_results:
+                continue
+            frames = [
+                depth_visualizer(frame, opacity)
+                for frame, opacity in zip(frames, render_results[opacity_key])
+            ]
+
+        frame = to8b(layout(frames, render_results["cam_names"]))
+        if save_seperate_video:
+            output_pth = save_pth.replace(".mp4", f"_{key}.mp4").replace(".png", f"_{key}.png")
+            if key not in writers:
+                writers[key] = (
+                    imageio.get_writer(output_pth, mode="I", fps=fps)
+                    if num_timestamps > 1 else imageio.get_writer(output_pth, mode="I")
+                )
+            writers[key].append_data(frame)
+            if frame_idx == num_timestamps // 2:
+                return_frame_dict[key] = frame
+        else:
+            merged_list.append(frame)
+
+    if not save_seperate_video and len(merged_list) > 0:
+        frame = np.concatenate(merged_list, axis=0)
+        if "concatenated_frame" not in writers:
+            writers["concatenated_frame"] = (
+                imageio.get_writer(save_pth, mode="I", fps=fps)
+                if num_timestamps > 1 else imageio.get_writer(save_pth, mode="I")
+            )
+        writers["concatenated_frame"].append_data(frame)
+        if frame_idx == num_timestamps // 2:
+            return_frame_dict["concatenated_frame"] = frame
+    return return_frame_dict
 
 
 def save_videos(
