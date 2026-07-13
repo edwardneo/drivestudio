@@ -277,13 +277,19 @@ class BasicTrainer(nn.Module):
             self.tic = time.time()
         
     def postprocess_per_train_step(self, step: int) -> None:
-        radii = self.info["radii"]
-        if self.render_cfg.absgrad:
-            grads = self.info["means2d"].absgrad.clone()
+        radii = self.info["radii"].amax(dim=-1)
+        if self.render_cfg.get("render_mode", "default") == "default":
+            if self.render_cfg.absgrad:
+                grads = self.info["means2d"].absgrad.clone()
+            else:
+                grads = self.info["means2d"].grad.clone()
+            grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
+            grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
         else:
-            grads = self.info["means2d"].grad.clone()
-        grads[..., 0] *= self.info["width"] / 2.0 * self.render_cfg.batch_size
-        grads[..., 1] *= self.info["height"] / 2.0 * self.render_cfg.batch_size
+            if self.render_cfg.absgrad:
+                grads = self.info["means3d"].grad.clone().abs()[None, ...]
+            else:
+                grads = self.info["means3d"].grad.clone()[None, ...]
         
         for class_name in self.gaussian_classes.keys():
             gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
@@ -312,7 +318,7 @@ class BasicTrainer(nn.Module):
     def update_visibility_filter(self) -> None:
         for class_name in self.gaussian_classes.keys():
             gaussian_mask = self.pts_labels == self.gaussian_classes[class_name]
-            self.models[class_name].cur_radii = self.info["radii"][0, gaussian_mask]
+            self.models[class_name].cur_radii = self.info["radii"].amax(dim=-1)[0, gaussian_mask]
 
     def process_camera(
         self,
@@ -388,6 +394,7 @@ class BasicTrainer(nn.Module):
         cam: dataclass_camera,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
+        render_mode = self.render_cfg.get("render_mode", "default")
     
         def render_fn(opaticy_mask=None, return_info=False):
             renders, alphas, info = rasterization(
@@ -404,6 +411,9 @@ class BasicTrainer(nn.Module):
                 absgrad=self.render_cfg.absgrad,
                 sparse_grad=self.render_cfg.sparse_grad,
                 rasterize_mode="antialiased" if self.render_cfg.antialiased else "classic",
+                with_ut=render_mode == "ut",
+                with_geer=render_mode == "geer",
+                with_eval3d=render_mode in ("ut", "geer"),
                 **kwargs,
             )
             renders = renders[0]
@@ -427,7 +437,11 @@ class BasicTrainer(nn.Module):
         }
         
         if self.training:
-            self.info["means2d"].retain_grad()
+            if render_mode == "default":
+                self.info["means2d"].retain_grad()
+            else:
+                self.info["means3d"] = gs.means
+                self.info["means3d"].retain_grad()
         
         return results, render_fn
 

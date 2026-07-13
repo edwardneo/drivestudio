@@ -52,6 +52,7 @@ Our codebase supports two types of Gaussian trainers:
 | [Deformable-GS](https://github.com/ingra14m/Deformable-3D-Gaussians) | Unofficial | Single | • Deformable Gaussians: Entire scene |
 | [PVG](https://github.com/fudan-zvg/PVG) | Unofficial | Single | • Periodic Vibration Gaussians: Entire scene |
 | [Street Gaussians](https://github.com/zju3dv/street_gaussians) | Unofficial | Multi | • Static Gaussians: Background, Vehicles |
+| [3DGEER](https://github.com/boschresearch/3dgeer) | Unofficial | Single/Multi | • Ray-Based Gaussians: Can be integrated with any other representation (see [here](./configs/3dgeer.md) for details) |
 
 We extend our gratitude to the authors for their remarkable contributions. If you find these works useful, please consider citing them.
 
