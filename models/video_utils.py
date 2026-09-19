@@ -184,6 +184,11 @@ def render(
 
             # ------------- rgb ------------- #
             rgb = results["rgb"]
+            if "valid_masks" in image_infos:
+                valid = image_infos["valid_masks"].bool()
+                rgb = rgb * valid[..., None]
+                if "pixels" in image_infos:
+                    image_infos["pixels"] = image_infos["pixels"] * valid[..., None]
             rgbs.append(get_numpy(rgb))
             if "pixels" in image_infos:
                 gt_rgbs.append(get_numpy(image_infos["pixels"]))
@@ -228,24 +233,24 @@ def render(
             if "rgb_sky" in results:
                 rgb_sky.append(get_numpy(results["rgb_sky"]))
             # ------------- depth ------------- #
-            depth = results["depth"]
-            depths.append(get_numpy(depth))
+            if results.get("depth") is not None:
+                depths.append(get_numpy(results["depth"]))
             # ------------- mask ------------- #
             if "opacity" in results:
                 opacities.append(get_numpy(results["opacity"]))
-            if "Background_depth" in results:
+            if results.get("Background_depth") is not None:
                 Background_depths.append(get_numpy(results["Background_depth"]))
                 Background_opacities.append(get_numpy(results["Background_opacity"]))
-            if "RigidNodes_depth" in results:
+            if results.get("RigidNodes_depth") is not None:
                 RigidNodes_depths.append(get_numpy(results["RigidNodes_depth"]))
                 RigidNodes_opacities.append(get_numpy(results["RigidNodes_opacity"]))
-            if "DeformableNodes_depth" in results:
+            if results.get("DeformableNodes_depth") is not None:
                 DeformableNodes_depths.append(get_numpy(results["DeformableNodes_depth"]))
                 DeformableNodes_opacities.append(get_numpy(results["DeformableNodes_opacity"]))
-            if "SMPLNodes_depth" in results:
+            if results.get("SMPLNodes_depth") is not None:
                 SMPLNodes_depths.append(get_numpy(results["SMPLNodes_depth"]))
                 SMPLNodes_opacities.append(get_numpy(results["SMPLNodes_opacity"]))
-            if "Dynamic_depth" in results:
+            if results.get("Dynamic_depth") is not None:
                 Dynamic_depths.append(get_numpy(results["Dynamic_depth"]))
                 Dynamic_opacities.append(get_numpy(results["Dynamic_opacity"]))
             if "sky_masks" in image_infos:
@@ -261,7 +266,15 @@ def render(
                 lidar_on_images.append(lidar_on_image)
 
             if compute_metrics:
-                psnr = compute_psnr(rgb, image_infos["pixels"])
+                if "valid_masks" in image_infos:
+                    valid = image_infos["valid_masks"].bool()
+                    psnr = (
+                        compute_psnr(rgb[valid], image_infos["pixels"][valid])
+                        if valid.any()
+                        else float("nan")
+                    )
+                else:
+                    psnr = compute_psnr(rgb, image_infos["pixels"])
                 ssim_score = ssim(
                     get_numpy(rgb),
                     get_numpy(image_infos["pixels"]),
@@ -279,6 +292,8 @@ def render(
                 
                 if "sky_masks" in image_infos:
                     occupied_mask = ~get_numpy(image_infos["sky_masks"]).astype(bool)
+                    if "valid_masks" in image_infos:
+                        occupied_mask &= get_numpy(image_infos["valid_masks"]).astype(bool)
                     if occupied_mask.sum() > 0:
                         occupied_psnrs.append(
                             compute_psnr(
@@ -297,6 +312,8 @@ def render(
 
                 if "dynamic_masks" in image_infos:
                     dynamic_mask = get_numpy(image_infos["dynamic_masks"]).astype(bool)
+                    if "valid_masks" in image_infos:
+                        dynamic_mask &= get_numpy(image_infos["valid_masks"]).astype(bool)
                     if dynamic_mask.sum() > 0:
                         masked_psnrs.append(
                             compute_psnr(
@@ -315,6 +332,8 @@ def render(
                 
                 if "human_masks" in image_infos:
                     human_mask = get_numpy(image_infos["human_masks"]).astype(bool)
+                    if "valid_masks" in image_infos:
+                        human_mask &= get_numpy(image_infos["valid_masks"]).astype(bool)
                     if human_mask.sum() > 0:
                         human_psnrs.append(
                             compute_psnr(
@@ -333,6 +352,8 @@ def render(
                 
                 if "vehicle_masks" in image_infos:
                     vehicle_mask = get_numpy(image_infos["vehicle_masks"]).astype(bool)
+                    if "valid_masks" in image_infos:
+                        vehicle_mask &= get_numpy(image_infos["valid_masks"]).astype(bool)
                     if vehicle_mask.sum() > 0:
                         vehicle_psnrs.append(
                             compute_psnr(
@@ -529,45 +550,47 @@ def save_videos(
     return return_frame
 
 
-def render_novel_views(trainer, render_data: list, save_path: str, fps: int = 30) -> None:
+def render_novel_views(trainer, render_data, save_path: str, fps: int = 30) -> None:
     """
     Perform rendering and save the result as a video.
     
     Args:
         trainer: Trainer object containing the rendering method
-        render_data (list): List of dicts, each containing elements required for rendering a single frame
+        render_data: Iterable of dicts containing the data for each frame
         save_path (str): Path to save the output video
         fps (int): Frames per second for the output video
     """
     trainer.set_eval()  
     
     writer = imageio.get_writer(save_path, mode='I', fps=fps)
-    
-    with torch.no_grad():
-        for frame_data in render_data:
-            # Move data to GPU
-            for key, value in frame_data["cam_infos"].items():
-                frame_data["cam_infos"][key] = value.cuda(non_blocking=True)
-            for key, value in frame_data["image_infos"].items():
-                frame_data["image_infos"][key] = value.cuda(non_blocking=True)
-            
-            # Perform rendering
-            outputs = trainer(
-                image_infos=frame_data["image_infos"],
-                camera_infos=frame_data["cam_infos"],
-                novel_view=True
-            )
-            
-            # Extract RGB image and mask
-            rgb = outputs["rgb"].cpu().numpy().clip(
-                min=1.e-6, max=1-1.e-6
-            )
-            
-            # Convert to uint8 and write to video
-            rgb_uint8 = (rgb * 255).astype(np.uint8)
-            writer.append_data(rgb_uint8)
-    
-    writer.close()
+    try:
+        with torch.no_grad():
+            for frame_data in render_data:
+                for key, value in frame_data["cam_infos"].items():
+                    if isinstance(value, Tensor):
+                        frame_data["cam_infos"][key] = value.to(
+                            trainer.device, non_blocking=True
+                        )
+                for key, value in frame_data["image_infos"].items():
+                    if isinstance(value, Tensor):
+                        frame_data["image_infos"][key] = value.to(
+                            trainer.device, non_blocking=True
+                        )
+
+                outputs = trainer(
+                    image_infos=frame_data["image_infos"],
+                    camera_infos=frame_data["cam_infos"],
+                    novel_view=True
+                )
+                rgb = outputs["rgb"].cpu().numpy().clip(
+                    min=1.e-6, max=1-1.e-6
+                )
+                if "egocar_masks" in frame_data["image_infos"]:
+                    rgb *= 1 - frame_data["image_infos"]["egocar_masks"].cpu().numpy()[..., None]
+                writer.append_data((rgb * 255).astype(np.uint8))
+                del outputs
+    finally:
+        writer.close()
     print(f"Video saved to {save_path}")
 
 
