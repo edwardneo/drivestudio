@@ -20,7 +20,7 @@ To use 3DGEER with any method:
 2. In the method's config `.yaml` file, under `trainer.render`, add:
 
     ```yaml
-    render_mode: geer # one of default | geer | ut
+    render_mode: geer # one of default | geer
     ```
 
     Remove `CamPose` from `model`.
@@ -33,7 +33,7 @@ To use 3DGEER with any method:
         undistort: False # set True to rectify images to pinhole geometry when loading
     ```
 
-    Native training uses the dataset's camera calibration and requires UT or GEER with support for that camera model.
+    Native training uses the dataset's camera calibration and requires GEER with support for that camera model.
 
     PhysicalAI uses one midpoint camera pose per image, a global-shutter approximation.
 
@@ -42,7 +42,7 @@ To use 3DGEER with any method:
     ```yaml
     render_novel:
       camera_model: fisheye
-      render_mode: geer # one of geer | ut
+      render_mode: geer 
       traj_types:
         - front_center_interp
       fov: 180.0 # degrees
@@ -54,7 +54,7 @@ To use 3DGEER with any method:
 
     ```yaml
     render_ftheta:
-      render_mode: geer # one of geer | ut
+      render_mode: geer 
       traj_types:
         - front_center_interp
       camera_id: 0 # dataset camera supplying FTheta calibration
